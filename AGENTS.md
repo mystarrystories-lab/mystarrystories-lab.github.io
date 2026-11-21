@@ -1,5 +1,8 @@
 # 홈페이지 작업 지침
 
+전체 프로젝트 인수인계는 [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md)를 먼저 읽는다.
+Claude, Codex, AGY/Antigravity, Grok 등 모든 에이전트가 같은 공통 문서를 기준으로 작업한다.
+
 ## 작업 대상
 
 - 로컬 폴더: `C:\Users\FAMILY\jane_homepage`
