@@ -25,7 +25,6 @@ function showPost(id){const post=posts.find(p=>p.id===id);if(!post){$('article-t
 function renderVideos(){const q=$('video-search').value.toLowerCase().trim();const list=videos.filter(v=>(videoFilter==='전체'||series(v.title)===videoFilter)&&v.title.toLowerCase().includes(q));$('video-count').textContent=`채널 영상 ${list.length}개 · 갱신일 2026.11.22`;$('video-list').replaceChildren();for(const v of list.slice(0,videoLimit)){const button=node('button',undefined,'video-card');button.type='button';const image=document.createElement('img');image.src=`https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`;image.alt='';image.loading='lazy';button.append(image,node('span',v.title));button.onclick=()=>playVideo(v);$('video-list').append(button);}$('more-videos').hidden=list.length<=videoLimit;filters($('video-filters'),['전체',...new Set(videos.map(v=>series(v.title)))],videoFilter,v=>{videoFilter=v;videoLimit=12;renderVideos();});if(!list.length)$('video-list').append(node('p','검색 결과가 없습니다.'));}
 function playVideo(v){if('speechSynthesis'in window)speechSynthesis.cancel();$('video-player-area').hidden=false;$('video-frame').replaceChildren(iframe(v));$('playing-title').textContent=v.title;$('youtube-original').href='https://www.youtube.com/watch?v='+v.id;$('video-player-area').scrollIntoView({behavior:'smooth',block:'start'});}
 function loadDeck() {
-  if ('speechSynthesis' in window) speechSynthesis.cancel();
   const id = $('deck').value;
   const post = posts.find(item => item.id === id);
   words = id === 'sample' ? [...sample] : id === 'custom' ? [...custom] : getWords(post || {text: ''});
@@ -43,7 +42,7 @@ function loadDeck() {
   showWord();
 }
 $('deck-audio').addEventListener('play', () => {
-  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  stopWordAudio();
   $('deck-audio-status').textContent = '';
 });
 $('deck-audio').addEventListener('error', () => {
@@ -51,14 +50,132 @@ $('deck-audio').addEventListener('error', () => {
     $('deck-audio-status').textContent = '작품 어휘 음원을 불러오지 못했습니다.';
   }
 });
-function showWord(){if('speechSynthesis'in window)speechSynthesis.cancel();const word=words[wordIndex];
+function showWord(){stopWordAudio();const word=words[wordIndex];
 for (const [index, id] of [[2,'word-example'], [3,'word-translation'], [4,'word-context'], [5,'word-scene']]) {
   $(id).textContent = word?.[index] || '';
   $(id).hidden = !word?.[index];
 }
 $('word-en').textContent=word?.[0]||'단어를 추가해 주세요';$('word-ko').textContent=word?.[1]||'';$('answer').hidden=true;$('reveal').hidden=false;$('reveal').disabled=!word;$('word-position').textContent=words.length?`${wordIndex+1} / ${words.length}`:'0 / 0';$('prev-word').disabled=words.length<2;$('next-word').disabled=words.length<2;$('speak-en').disabled=!word;$('speak-ko').disabled=!word;$('word-hint').textContent='먼저 뜻을 생각해 보세요.';}
-function speak(text,lang){$('deck-audio').pause();if(!('speechSynthesis'in window)){$('speech-status').textContent='이 브라우저는 음성 읽기를 지원하지 않습니다. Listening에서 영상 원음을 이용하세요.';return;}speechSynthesis.cancel();const utter=new SpeechSynthesisUtterance(text);utter.lang=lang;const voices=speechSynthesis.getVoices();utter.voice=voices.find(v=>v.lang===lang)||voices.find(v=>v.lang.startsWith(lang.slice(0,2)))||null;utter.rate=.87;utter.onerror=e=>{if(!['canceled','interrupted'].includes(e.error))$('speech-status').textContent='음성 재생에 실패했습니다. 기기의 언어 음성 설치 상태를 확인하거나 영상으로 들어 주세요.';};speechSynthesis.speak(utter);}
-function route(){const hash=decodeURIComponent(location.hash.slice(1)||'home');const part=hash.startsWith('post/')?'article':hash;const target=['home','library','article','words','videos','about'].includes(part)?part:'home';document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!==target);document.querySelectorAll('[data-nav]').forEach(a=>a.classList.toggle('active',a.dataset.nav===(target==='article'?'library':target)));if(target==='article')showPost(hash.slice(5));else document.title="Rosy Nook · Jane's English Journal";if(target!=='videos'){$('video-frame').replaceChildren();$('video-player-area').hidden=true;}if(target!=='article')$('related-video').replaceChildren();if(target!=='words')$('deck-audio').pause();if('speechSynthesis'in window)speechSynthesis.cancel();window.scrollTo({top:0,behavior:'instant'});}
+const pronunciationPath = 'audio/word-pronunciation/';
+let pronunciationIndex;
+let wordAudioContext;
+let cachedWordAudio;
+let playingWord;
+let currentSpeech;
+let wordAudioRequest = 0;
+
+function stopWordAudio() {
+  wordAudioRequest++;
+  if (playingWord) {
+    playingWord.stop();
+    playingWord = null;
+  }
+  if (currentSpeech) {
+    window.speechSynthesis.cancel();
+    currentSpeech = null;
+  }
+  $('speech-status').textContent = '';
+}
+
+async function fetchPronunciation(file, options) {
+  const response = await fetch(pronunciationPath + file, options);
+  if (!response.ok) throw new Error('Pronunciation audio request failed');
+  return response;
+}
+
+function getPronunciationIndex() {
+  pronunciationIndex ??= fetchPronunciation('index.json', {cache: 'no-cache'})
+    .then(response => response.json())
+    .catch(error => {
+      pronunciationIndex = null;
+      throw error;
+    });
+  return pronunciationIndex;
+}
+
+function getWordAudio(file) {
+  if (cachedWordAudio?.file !== file) {
+    const buffer = fetchPronunciation(file + '.mp3')
+      .then(response => response.arrayBuffer())
+      .then(data => wordAudioContext.decodeAudioData(data))
+      .catch(error => {
+        if (cachedWordAudio?.buffer === buffer) cachedWordAudio = null;
+        throw error;
+      });
+    cachedWordAudio = {file, buffer};
+  }
+  return cachedWordAudio.buffer;
+}
+
+function speakWithDevice(text, language, request) {
+  const synth = window.speechSynthesis;
+  const voices = synth?.getVoices() ?? [];
+  const voice = voices.find(item => item.lang.toLowerCase() === language.toLowerCase())
+    ?? voices.find(item => item.lang.toLowerCase().split(/[-_]/)[0] === language.slice(0, 2));
+  if (!voice) {
+    $('speech-status').textContent = language === 'en-US'
+      ? '영어 음원을 재생할 수 없습니다. 기기의 영어 음성을 추가하면 다시 들을 수 있어요.'
+      : '이 기기에서 한국어 음성을 찾을 수 없습니다.';
+    return;
+  }
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = voice.lang;
+  utterance.voice = voice;
+  utterance.rate = .87;
+  utterance.onend = () => {
+    if (currentSpeech === utterance) currentSpeech = null;
+  };
+  utterance.onerror = ({error}) => {
+    if (currentSpeech === utterance) currentSpeech = null;
+    if (request === wordAudioRequest && !['canceled', 'interrupted'].includes(error)) {
+      $('speech-status').textContent = '음성을 재생하지 못했습니다. 듣기 버튼을 다시 눌러 주세요.';
+    }
+  };
+  currentSpeech = utterance;
+  synth.speak(utterance);
+}
+
+async function speak(text, language) {
+  stopWordAudio();
+  $('deck-audio').pause();
+  const request = wordAudioRequest;
+  if (language === 'en-US' && (window.AudioContext || window.webkitAudioContext)) {
+    $('speech-status').textContent = '영어 음원을 불러오는 중…';
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      wordAudioContext ??= new AudioContext();
+      // Start unlocking audio while the button click still has user activation.
+      const resume = wordAudioContext.resume();
+      const [index] = await Promise.all([getPronunciationIndex(), resume]);
+      const term = text.trim();
+      const clip = Object.hasOwn(index, term) ? index[term] : null;
+      if (request !== wordAudioRequest) return;
+      if (clip) {
+        const [file, offset, duration] = clip;
+        const buffer = await getWordAudio(file);
+        if (request !== wordAudioRequest) return;
+        const source = wordAudioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(wordAudioContext.destination);
+        source.onended = () => {
+          if (playingWord === source) playingWord = null;
+          source.disconnect();
+        };
+        source.start(0, offset, duration);
+        playingWord = source;
+        $('speech-status').textContent = '';
+        return;
+      }
+    } catch {
+      // A matching device voice can still speak when the audio file is unavailable.
+    }
+  }
+  if (request === wordAudioRequest) {
+    $('speech-status').textContent = '';
+    speakWithDevice(text, language, request);
+  }
+}
+function route(){const hash=decodeURIComponent(location.hash.slice(1)||'home');const part=hash.startsWith('post/')?'article':hash;const target=['home','library','article','words','videos','about'].includes(part)?part:'home';document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!==target);document.querySelectorAll('[data-nav]').forEach(a=>a.classList.toggle('active',a.dataset.nav===(target==='article'?'library':target)));if(target==='article')showPost(hash.slice(5));else document.title="Rosy Nook · Jane's English Journal";if(target!=='videos'){$('video-frame').replaceChildren();$('video-player-area').hidden=true;}if(target!=='article')$('related-video').replaceChildren();if(target!=='words')$('deck-audio').pause();stopWordAudio();window.scrollTo({top:0,behavior:'instant'});}
 $('post-search').oninput=()=>{postLimit=12;renderPosts();};$('video-search').oninput=()=>{videoLimit=12;renderVideos();};$('more-posts').onclick=()=>{postLimit+=12;renderPosts();};$('more-videos').onclick=()=>{videoLimit+=12;renderVideos();};$('deck').onchange=loadDeck;$('reveal').onclick=()=>{$('answer').hidden=false;$('reveal').hidden=true;$('word-hint').textContent='뜻을 확인했어요. 소리 내어 한 번 따라 읽어 보세요.';if(words[wordIndex]&&$('deck-audio').paused)speak(words[wordIndex][1],'ko-KR');};$('speak-en').onclick=()=>words[wordIndex]&&speak(words[wordIndex][0],'en-US');$('speak-ko').onclick=()=>words[wordIndex]&&speak(words[wordIndex][1],'ko-KR');
 function moveWord(delta){if(!words.length)return;wordIndex=(wordIndex+delta+words.length)%words.length;showWord();if($('auto-speak').checked)speak(words[wordIndex][0],'en-US');}$('prev-word').onclick=()=>moveWord(-1);$('next-word').onclick=()=>moveWord(1);$('shuffle').onclick=()=>{for(let i=words.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[words[i],words[j]]=[words[j],words[i]];}wordIndex=0;showWord();};
 $('save-words').onclick=()=>{const raw=$('custom-words').value.trim();const rows=raw.split('\n').filter(s=>s.trim());const parsed=rows.map(s=>s.split(/\t|\|/).map(x=>x.trim()));if(!raw||parsed.some(p=>p.length!==2||!p[0]||!p[1])){$('save-status').textContent='각 줄을 영어 | 한글 형식으로 입력해 주세요. 빈 뜻이나 구분자가 없는 줄이 있습니다.';return;}custom=parsed;try{localStorage.setItem('rosynook-words',JSON.stringify(custom));$('save-status').textContent=`${custom.length}개 단어를 이 브라우저에 저장했습니다.`;}catch{$('save-status').textContent='브라우저 저장 공간을 사용할 수 없어 현재 화면에서만 학습할 수 있습니다.';}$('deck').value='custom';loadDeck();};
